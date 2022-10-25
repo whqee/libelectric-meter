@@ -76,7 +76,7 @@ fn main() {
     );
 
     println!(
-        "[DebugInfo] {:X?}",
+        "[DebugInfo] {:04X?}",
         electric_meter::generic_function(
             Some([0x00, 0x00, 0x00, 0x00, 0x00, 0x1]),
             electric_meter::FunctionCode::M查询温度,

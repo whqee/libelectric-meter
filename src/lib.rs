@@ -81,8 +81,8 @@ pub enum MeterResult {
     /// xxxxxx_xx (0.01 KWh)
     B路有功总电量_单位0_01KWh(u32),
 
-    /// xx_xx (0.01 ℃)
-    温度_单位0_01C(u16),
+    /// xx_xx (0.1 ℃)
+    温度_单位0_1C(u16),
 
     BaudRate(BaudRate),
 
@@ -298,7 +298,7 @@ impl DLT645_2007 {
             return Err(MeterError::BadData);
         }
 
-        // println!("[DebugInfo] raw.len = {}, {:02X?}", raw.len(), raw);
+        println!("[DebugInfo] raw.len = {}, {:02X?}", raw.len(), raw);
         // check 'C'
         // 算了。。没必要
 
@@ -480,10 +480,11 @@ impl From<PayloadData> for Result<MeterResult, MeterError> {
                     .fold(0, |acc, i| acc + (((i.1 - 0x33) as u32) << i.0 * 8)),
             )),
 
-            Some(DI_DTL645通用_温度) => Ok(MeterResult::温度_单位0_01C(
+            Some(DI_DTL645通用_温度) => Ok(MeterResult::温度_单位0_1C(
                 // safe
                 // u16::from_be_bytes(unsafe { *(value.data.as_ptr() as *mut [u8; 2]) }) - 0x3333,
                 unsafe { *(value.data.as_ptr() as *mut u16) } - 0x3333,
+                // u16::from(value.data[0])
             )),
 
             Some(DI_IM1281X_波特率) => {
@@ -496,12 +497,17 @@ impl From<PayloadData> for Result<MeterResult, MeterError> {
                     _ => return Err(MeterError::Unsupported("BaudRate".to_string())),
                 }))
             }
-            // Indicate that payload is only 6 Bytes Meter Address
+            // This version, it's returned Meter's 6 Bytes address
             None => {
                 // println!("Payload.data {:02X?}", value.data);
-                let mut addr: [u8; 6] = unsafe { *(value.data.as_ptr() as *mut [u8; 6]) };
-                for ptr in addr.iter_mut() {
-                    *ptr -= 0x33;
+                // let mut addr: [u8; 6] = unsafe { *(value.data.as_ptr() as *mut [u8; 6]) };
+                // addr.reverse();
+                // for ptr in addr.iter_mut() {
+                //     *ptr -= 0x33;
+                // }
+                let mut addr = [0u8; 6];
+                for (i, j) in value.data.iter().rev().enumerate() {
+                    addr[i] = (*j as usize - 0x33) as u8;
                 }
                 // data 6 bytes
                 Ok(MeterResult::MeterAddr(addr))
