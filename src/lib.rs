@@ -26,18 +26,18 @@ pub enum FunctionCode {
     // /// 冻结电能数据（计量模块没这功能，这个要采集端去实现，挂这先）
     // FreezeCmdReserved,
     // /// 清零（计量数据，不含地址）,计量模块也没有这功能
-    // ResetMeter,
+    MResetMeter,
     // /// 读电压（一个模块接一路测量电压，其他路电压也是这个）
     // M查询电压,
     // /// 读A路电流。 艾瑞达你B路文档呢？。。。
-    // M查询A路电流,
+    M查询A路电流,
     M查询A路有功总电量IM1281X,
     M查询B路有功总电量IM1281X,
     M查询温度,
 }
 
 /// 电表控制码，目前支持部分功能，生活区抄表够用了
-#[allow(unused)]
+// #[allow(unused)]
 #[derive(Debug, PartialEq, Eq)]
 enum Code {
     Reserved = 0b00000,
@@ -87,6 +87,8 @@ pub enum MeterResult {
     BaudRate(BaudRate),
 
     SetMeterAddrSuccess([u8; 6]),
+
+    ResetMeterSuccess([u8;6])
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -144,6 +146,8 @@ pub struct MeterIO {
 
     /// Function. read exact! bytes
     recv_exact: Box<dyn FnMut(&mut [u8]) -> Result<(), MeterIOError>>,
+    // /// Function. change master's baudrate
+    // change_baud: Box<dyn FnMut(BaudRate) -> Result<(), MeterIOError>>,
 }
 
 // pub struct MeterIO {
@@ -370,6 +374,8 @@ impl From<&FunctionCode> for Code {
             FunctionCode::M查询A路有功总电量IM1281X => Self::ReadData,
             FunctionCode::M查询B路有功总电量IM1281X => Self::ReadData,
             FunctionCode::M查询温度 => Self::ReadData,
+            FunctionCode::M查询A路电流 => Self::ReadData,
+            FunctionCode::MResetMeter => Self::ResetMeter,
         }
     }
 }
@@ -436,7 +442,7 @@ impl From<DLT645_2007> for Result<MeterResult, Error> {
                 Code::ResetMaxDemand => {
                     Err(MeterError::UnsupportedYet("ResetMaxDemand".to_string()))
                 }
-                Code::ResetMeter => Err(MeterError::UnsupportedYet("ResetMeter".to_string())),
+                Code::ResetMeter => Ok(MeterResult::ResetMeterSuccess(value.addr)),
                 Code::ResetEvent => Err(MeterError::UnsupportedYet("ResetEvent".to_string())),
                 _ => Err(MeterError::UnknownErr(
                     "UnknownErr Meter Code: ".to_string() + &value.code.to_string(),
@@ -559,6 +565,14 @@ impl From<&FunctionCode> for Option<PayloadData> {
                 data_identifiers: Some(DI_DTL645通用_温度),
                 data: Vec::with_capacity(0),
             }),
+            FunctionCode::M查询A路电流 => Self::Some(PayloadData {
+                data_identifiers: Some(DI_DTL645通用_A路电流),
+                data: Vec::with_capacity(0),
+            }),
+            FunctionCode::MResetMeter => Self::Some(PayloadData {
+                data_identifiers: None,
+                data: vec![0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33],
+            }),
         }
     }
 }
@@ -589,6 +603,8 @@ pub fn __bytes_should_recv(fc: FunctionCode) -> usize {
         FunctionCode::M查询A路有功总电量IM1281X => 12 + 4 + 4,
         FunctionCode::M查询B路有功总电量IM1281X => 12 + 4 + 4,
         FunctionCode::M查询温度 => 12 + 4 + 2,
+        FunctionCode::M查询A路电流 => 12 + 4 + 3,
+        FunctionCode::MResetMeter => 12,
     }
 }
 
