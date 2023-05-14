@@ -1,3 +1,10 @@
+#![no_std]
+extern crate alloc;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::mem::size_of;
 use core::ptr::slice_from_raw_parts;
 
@@ -88,7 +95,7 @@ pub enum MeterResult {
 
     SetMeterAddrSuccess([u8; 6]),
 
-    ResetMeterSuccess([u8;6])
+    ResetMeterSuccess([u8; 6]),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -302,7 +309,7 @@ impl DLT645_2007 {
             return Err(MeterError::BadData);
         }
 
-        println!("[DebugInfo] raw.len = {}, {:02X?}", raw.len(), raw);
+        // println!("[DebugInfo] raw.len = {}, {:02X?}", raw.len(), raw);
         // check 'C'
         // 算了。。没必要
 
