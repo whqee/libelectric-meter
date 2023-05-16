@@ -1,43 +1,49 @@
 use std::io::{Read, Write};
 
-use electric_meter::{MeterIO, MeterIOError};
+use electric_meter::MeterIOError;
 use uart_linux::Uart;
 
 fn main() {
-    let path = "/dev/ttyUSB1";
-    let mut wo = Uart::new_default(path, uart_linux::Permission::RW);
+    let path = "/dev/ttyUSB0";
+    let mut uart: Uart = Uart::new_default_locked(path, uart_linux::Permission::RW);
 
-    wo.baudrate = uart_linux::BaudRate::Baud9600;
-    wo.apply_settings();
+    uart.baudrate = uart_linux::BaudRate::Baud9600;
+    uart.timeout_20us = 6000; // 120ms
+    // uart.timeout_s = 1;
+    uart.apply_settings();
 
-    let mut ro = Uart::new_default(path, uart_linux::Permission::RW);
-    // ro.timeout_s = 1;
-    ro.timeout_20us = 6000; // 120ms
+    struct UartIo {
+        uart: uart_linux::Uart,
+    }
 
-    let send = move |buf: &[u8]| -> Result<usize, MeterIOError> {
-        match wo.write(buf) {
-            Ok(sent) => {
-                if sent < buf.len() {
-                    Err(MeterIOError::IncompleteWrite)
-                } else {
-                    Ok(sent)
+    impl electric_meter::Io for UartIo {
+        fn write(&mut self, buf: &[u8]) -> Result<usize, MeterIOError> {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            match self.uart.write(buf) {
+                Ok(sent) => {
+                    if sent < buf.len() {
+                        Err(MeterIOError::IncompleteWrite)
+                    } else {
+                        Ok(sent)
+                    }
+                }
+                Err(e) => Err(MeterIOError::Std(e.kind().to_string())),
+            }
+        }
+
+        fn recv_exact(&mut self, buf: &mut [u8]) -> Result<(), MeterIOError> {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            match self.uart.read_exact(buf) {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    println!("[ErrInfo]: {:?} \\\n   recved = {:X?}", e, buf);
+                    Err(MeterIOError::TimeOutReadExactBytes)
                 }
             }
-            Err(e) => Err(MeterIOError::STD(e.kind().to_string())),
         }
-    };
+    }
 
-    let recv_exact = move |buf: &mut [u8]| -> Result<(), MeterIOError> {
-        match ro.read_exact(buf) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                println!("[ErrInfo]: {:?}\n recved = {:X?}", e, buf);
-                Err(MeterIOError::TimeOutReadExactBytes)
-            }
-        }
-    };
-
-    let mut io_ops = MeterIO::new(Box::new(send), Box::new(recv_exact));
+    let mut io_ops = UartIo { uart };
 
     println!(
         "Test Result: {:X?}",

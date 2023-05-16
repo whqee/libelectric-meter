@@ -1,10 +1,14 @@
 #![no_std]
+
+#[cfg(any(windows, unix))]
 extern crate alloc;
-use alloc::boxed::Box;
+#[cfg(any(windows, unix))]
 use alloc::string::String;
-use alloc::string::ToString;
-use alloc::vec;
-use alloc::vec::Vec;
+
+// use alloc::string::String;
+// use alloc::string::ToString;
+// use alloc::vec;
+// use alloc::vec::Vec;
 use core::mem::size_of;
 use core::ptr::slice_from_raw_parts;
 
@@ -112,18 +116,31 @@ pub enum MeterError {
     ErrCRC,
     // BadAddress,
     // InvalidAddr,
-    // UnsupportedDataIdentity,
+    UnsupportedYetDI(u32),
+    UnsupportedYetChangePasswd,
+    UnsupportedYetResetMaxDemand,
+    UnsupportedYetResetEvent,
+    UnsupportedYetBroadcastTime,
+    UnsupportedYetWriteData,
+    UnsupportedFreezeCmd,
+    UnExpectedNonePayload,
+    UnExpectedPayload,
+    UnExpectedNoneAddr,
+    UnknownBaudrate,
     ParseResultFailed,
     // SlaveAckErr(u8),
     IoErr(MeterIOError),
     NotSlaveMessage,
     SlaveAckErr,
     // 呃这个命名。。。可能永远不用改这个库了，不改了，就先这样。。。
-    UnsupportedYet(String),
-    Unsupported(String),
-    UnknownErr(String),
+    // UnsupportedYet(String),
+    UnsupportedYetSubsequentDataFollowUpFlag,
+    UnsupportedYetReadSubsequentData,
+    // Unsupported(String),
+    UnknownErr,
     ParseAddrFromStringErr,
-    ParseDiErr(String),
+    // ParseDiErr(String),
+    ReservedCode,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -134,51 +151,32 @@ pub enum MeterIOError {
     // NoSuchDevice,
     IncompleteWrite,
     // ReadTimeout,
-    STD(String),
+    #[cfg(any(windows, unix))]
+    Std(String),
 }
-
-// pub enum MeterIO {
-//     Closure(MeterIoClosure),
-//     Fn(MeterIoFn),
-// }
-
-// pub struct MeterAddr {
-//     raw: [u8; 6],
-// }
-
-/// See examples/example.rs
-pub struct MeterIO {
-    /// Function. return sent bytes. This should support concurrency.
-    send: Box<dyn FnMut(&[u8]) -> Result<usize, MeterIOError>>,
-
-    /// Function. read exact! bytes
-    recv_exact: Box<dyn FnMut(&mut [u8]) -> Result<(), MeterIOError>>,
-    // /// Function. change master's baudrate
-    // change_baud: Box<dyn FnMut(BaudRate) -> Result<(), MeterIOError>>,
-}
-
-// pub struct MeterIO {
-//     /// Function. return recieved bytes. This should support concurrency.
-//     pub recv_exact_bytes: fn(&mut [u8]) -> Result<(), MeterIOError>,
-
-//     /// Function. return sent bytes. This should support concurrency.
-//     pub send_bytes: fn(&[u8]) -> Result<usize, MeterIOError>,
-// }
 
 // #[repr(C)]
 #[derive(Debug, Clone)]
 struct DLT645_2007 {
     addr: [u8; 6],
     code: u8,
-    data_len: u8,
-    data: Option<PayloadData>,
+    payload_len: u8,
+    payload: Option<Payload>,
     // checksum: u8,
 }
 
+pub struct DLT645_2007Raw {
+    len: u8,
+    // 够用了
+    container: [u8; 31],
+}
+
 #[derive(Debug, Clone)]
-struct PayloadData {
+struct Payload {
     data_identifiers: Option<u32>,
-    data: Vec<u8>,
+    data_len: u8,
+    // 目前最大也就4+4
+    data: [u8; 11],
 }
 
 // impl TryFrom<&str> for MeterAddr {
@@ -233,24 +231,35 @@ impl From<u8> for Code {
     }
 }
 
-impl PayloadData {
+impl Payload {
     #[inline]
     fn len(&self) -> u8 {
         if self.data_identifiers.is_some() {
-            (size_of::<u32>() + self.data.len()) as u8
+            size_of::<u32>() as u8 + self.data_len + 1
         } else {
-            self.data.len() as u8
+            self.data_len + 1
         }
     }
 }
 
+impl DLT645_2007Raw {
+    pub fn as_ref(&self) -> &[u8] {
+        &self.container[..self.len as usize]
+    }
+}
+
 impl DLT645_2007 {
-    fn new(addr: [u8; 6], code: Code, data: Option<PayloadData>) -> DLT645_2007 {
+    fn new(addr: [u8; 6], code: Code, payload: Option<Payload>) -> DLT645_2007 {
+        let (payload_len, payload) = if let Some(p) = payload {
+            (p.len(), Some(p))
+        } else {
+            (0, None)
+        };
         DLT645_2007 {
             addr,
             code: code.val(),
-            data_len: UNINIT_ZERO,
-            data,
+            payload_len,
+            payload,
             // checksum: UNINIT_ZERO,
         }
     }
@@ -264,41 +273,62 @@ impl DLT645_2007 {
     }
 
     // 转换成报文的裸字节形式，用于发送
-    fn to_raw(mut self) -> Vec<u8> {
+    fn to_dlt645_2007raw(mut self) -> DLT645_2007Raw {
         // capacity = HEAD.len + ADDR.len + HEAD.len + CODE.len + DATA_LEN.len + DATA.len + CS.len + TAIL.len
         //  = 12 + DATA.len
-        let capacity = 12 + self.data_len;
-        let mut v = Vec::with_capacity(capacity.into());
+        // if self.payload_len > 0 {
+        //     self.payload_len -= 1;
+        // }
+        // let capacity = 12 + self.payload_len;
+        let mut container = [0u8; 31];
+        let mut i = 0;
 
-        v.push(0x68);
+        container[i] = 0x68;
+        i += 1;
         // reverse (Big Endain)
-        for i in (0..6).rev() {
-            v.push(self.addr[i])
+        for j in (0..6).rev() {
+            container[i] = self.addr[j];
+            i += 1;
         }
-        v.push(0x68);
-        v.push(self.code);
+        container[i] = 0x68;
+        i += 1;
+        container[i] = self.code;
+        i += 1;
 
-        if let Some(payload_data) = self.data {
-            self.data_len = payload_data.len();
-            v.push(self.data_len);
+        if let Some(payload) = self.payload {
+            let payload_len = payload.len() - 1;
+            self.payload_len = payload_len + 1;
+            container[i] = payload_len;
+            i += 1;
 
-            if let Some(di) = payload_data.data_identifiers {
-                v.extend_from_slice(&(di + 0x3333_3333_u32).to_le_bytes());
+            if let Some(di) = payload.data_identifiers {
+                container[i..i + 4].clone_from_slice(&(di + 0x3333_3333_u32).to_le_bytes());
+                i += 4;
             }
-            v.extend_from_slice(&payload_data.data);
+            // v.extend_from_slice(&payload.data);
+            container[i..i + payload.data.len()].clone_from_slice(&payload.data);
+            i += payload.data_len as usize;
         } else {
-            v.push(self.data_len);
+            // payload len = 0
+            container[i] = 0;
+            i += 1;
         }
+        container[i] = DLT645_2007::checksum(&container[..i]);
+        i += 1;
+        container[i] = 0x16;
+        i += 1;
 
-        v.push(DLT645_2007::checksum(&v));
-        v.push(0x16);
+        assert!(i <= container.len());
 
         // Debug Message
         // println!("[DebugInfo] DTL645 to raw = {:02X?}", v);
         // print_frame(&v);
         // todo!();
 
-        v
+        DLT645_2007Raw {
+            len: i as u8,
+            container,
+        }
     }
 
     // 从裸字节报文里解析信息成结构体
@@ -313,7 +343,8 @@ impl DLT645_2007 {
         // check 'C'
         // 算了。。没必要
 
-        let data_len = raw[9] as usize;
+        let code = raw[8];
+        let mut payload_len = raw[9];
 
         // len before checksum
         let len = raw.len() - 2;
@@ -331,42 +362,47 @@ impl DLT645_2007 {
             return Err(MeterError::BadData);
         }
 
-        let data = if data_len == 0 {
+        let payload = if payload_len == 0 {
             None
         } else {
+            let mut data_len = payload_len;
+            payload_len += 1;
             let data_identifiers;
-            let data;
-            if Code::ReadData.val() | 0x80 == raw[8]
-                // || Code::WriteData.val() | 0x80 == raw[8]
-                || Code::ReadSubsequentData.val() | 0x80 == raw[8]
+            let mut data = [0u8; 11];
+            if Code::ReadData.val() | 0x80 == code
+                // || Code::WriteData.val() | 0x80 == code
+                || Code::ReadSubsequentData.val() | 0x80 == code
             {
                 data_identifiers = Some(
                     &u32::from_le_bytes(unsafe { *(raw[10..=13].as_ptr() as *mut [u8; 4]) })
                         - 0x3333_3333,
                 );
-                data =
-                    unsafe { &*slice_from_raw_parts(raw.as_ptr().add(14), data_len - 4) }.to_vec()
+                data_len -= 4;
+                data[..data_len as usize].clone_from_slice(&raw[14..14 + data_len as usize]);
             } else {
                 data_identifiers = None;
-                data = unsafe { &*slice_from_raw_parts(raw.as_ptr().add(10), data_len) }.to_vec()
+                data[..data_len as usize].clone_from_slice(&raw[10..10 + data_len as usize]);
             }
-            Some(PayloadData {
+            Some(Payload {
                 data_identifiers,
+                data_len,
                 data,
             })
         };
 
         let mut addr = [0u8; 6];
-        for (i, j) in (1..7).rev().enumerate() {
-            // println!("raw[{}]={:X}", j, raw[j]);
-            addr[i] = raw[j];
-        }
+        addr.clone_from_slice(&raw[1..7]);
+        addr.reverse();
+        // for (i, j) in (1..7).rev().enumerate() {
+        //     // println!("raw[{}]={:X}", j, raw[j]);
+        //     addr[i] = raw[j];
+        // }
 
         Ok(DLT645_2007 {
             addr,
-            code: raw[8],
-            data_len: data_len as u8,
-            data,
+            code,
+            payload_len,
+            payload,
             // checksum: raw[len],
         })
     }
@@ -390,150 +426,145 @@ impl From<&FunctionCode> for Code {
 // for Master to Parse the recved result
 impl From<DLT645_2007> for Result<MeterResult, Error> {
     fn from(value: DLT645_2007) -> Self {
-        if value.code & Code::SlaveFlag.val() == 0 {
+        let code = value.code;
+        if code & Code::SlaveFlag.val() == 0 {
             Err(MeterError::NotSlaveMessage)
-        } else if value.code & Code::SlaveACKErr.val() != 0 {
+        } else if code & Code::SlaveACKErr.val() != 0 {
             Err(MeterError::SlaveAckErr)
-        } else if value.code & Code::SubsequentDataFollowUp.val() != 0 {
+        } else if code & Code::SubsequentDataFollowUp.val() != 0 {
             // unimplemented!()
-            Err(MeterError::UnsupportedYet(
-                "SubsequentDataFollowUp".to_string(),
-            ))
+            Err(MeterError::UnsupportedYetSubsequentDataFollowUpFlag)
         } else {
-            // println!("Code {:X}", value.code);
-            match (value.code & !Code::SlaveFlag.val()).into() {
-                Code::Reserved => Err(MeterError::UnsupportedYet("Reserved".to_string())),
-                Code::BroadcastTime => Err(MeterError::UnsupportedYet("BroadcastTime".to_string())),
+            // println!("Code {:X}", code);
+            match (code & !Code::SlaveFlag.val()).into() {
+                Code::Reserved => Err(MeterError::ReservedCode),
+                Code::BroadcastTime => Err(MeterError::UnsupportedYetBroadcastTime),
                 Code::ReadData => {
-                    if value.data.is_some() {
-                        value.data.unwrap().into()
+                    if let Some(p) = value.payload {
+                        p.into()
                     } else {
-                        Err(MeterError::UnknownErr("ReadData, but data is none".into()))
+                        Err(MeterError::UnExpectedNonePayload)
                     }
                 }
-                Code::ReadSubsequentData => {
-                    Err(MeterError::UnsupportedYet("ReadSubsequentData".to_string()))
-                }
+                Code::ReadSubsequentData => Err(MeterError::UnsupportedYetReadSubsequentData),
                 Code::ReadAddr => {
-                    if value.data.is_some() {
-                        value.data.unwrap().into()
+                    if let Some(p) = value.payload {
+                        p.into()
                     } else {
-                        Err(MeterError::UnknownErr("ReadAddr, but data is none".into()))
+                        Err(MeterError::UnExpectedNoneAddr)
                     }
                 }
-                Code::WriteData => Err(MeterError::UnsupportedYet("to do".to_string())),
+                Code::WriteData => Err(MeterError::UnsupportedYetWriteData),
                 Code::WriteAddr => {
-                    if value.data.is_none() {
-                        Ok(MeterResult::SetMeterAddrSuccess(value.addr))
+                    if let Some(p) = value.payload {
+                        Err(MeterError::UnExpectedPayload)
                     } else {
-                        Err(MeterError::UnknownErr("WriteAddr, but data is_some".into()))
+                        Ok(MeterResult::SetMeterAddrSuccess(value.addr))
                     }
                 }
-                Code::FreezeCmd => Err(MeterError::UnsupportedYet("FreezeCmd".to_string())),
+                Code::FreezeCmd => Err(MeterError::UnsupportedFreezeCmd),
                 Code::ChangeBaudrate => {
-                    if value.data.is_some() {
-                        match value.data.unwrap().data[0] - 0x33 {
+                    if let Some(p) = value.payload {
+                        match p.data[0] - 0x33 {
                             0x04 => Ok(MeterResult::BaudRate(BaudRate::Baud1200)),
                             0x08 => Ok(MeterResult::BaudRate(BaudRate::Baud2400)),
                             0x10 => Ok(MeterResult::BaudRate(BaudRate::Baud4800)),
                             0x20 => Ok(MeterResult::BaudRate(BaudRate::Baud9600)),
-                            _ => Err(MeterError::UnknownErr("BaudRate".to_string())),
+                            _ => Err(MeterError::UnknownBaudrate),
                         }
                     } else {
-                        Err(MeterError::UnknownErr(
-                            "ChangeBaudrate returned data is none ¿".to_string(),
-                        ))
+                        Err(MeterError::UnExpectedNonePayload)
                     }
                 }
-                Code::ChangPasswd => Err(MeterError::UnsupportedYet("ChangPasswd".to_string())),
-                Code::ResetMaxDemand => {
-                    Err(MeterError::UnsupportedYet("ResetMaxDemand".to_string()))
-                }
+                Code::ChangPasswd => Err(MeterError::UnsupportedYetChangePasswd),
+                Code::ResetMaxDemand => Err(MeterError::UnsupportedYetResetMaxDemand),
                 Code::ResetMeter => Ok(MeterResult::ResetMeterSuccess(value.addr)),
-                Code::ResetEvent => Err(MeterError::UnsupportedYet("ResetEvent".to_string())),
-                _ => Err(MeterError::UnknownErr(
-                    "UnknownErr Meter Code: ".to_string() + &value.code.to_string(),
+                Code::ResetEvent => Err(MeterError::UnsupportedYetResetEvent),
+                _ => Err(MeterError::UnknownErr),
+            }
+        }
+    }
+}
+
+impl From<Payload> for Result<MeterResult, MeterError> {
+    fn from(payload: Payload) -> Self {
+        if let Some(di) = payload.data_identifiers {
+            match di {
+                DI_IM1281X_A路有功总电量 => {
+                    Ok(MeterResult::A路有功总电量_单位0_01KWh(
+                        // safe
+                        u32::from_le_bytes(unsafe { *(payload.data.as_ptr() as *mut [u8; 4]) })
+                            - 0x3333_3333,
+                    ))
+                }
+
+                DI_IM1281X_B路有功总电量 => {
+                    Ok(MeterResult::B路有功总电量_单位0_01KWh(
+                        // safe
+                        u32::from_le_bytes(unsafe { *(payload.data.as_ptr() as *mut [u8; 4]) })
+                            - 0x3333_3333,
+                    ))
+                }
+
+                DI_DTL645通用_A路电压 => Ok(MeterResult::A路电压单位0_1V(
+                    // safe
+                    u16::from_le_bytes(unsafe { *(payload.data.as_ptr() as *mut [u8; 2]) })
+                        - 0x3333,
+                )),
+
+                //
+                DI_DTL645通用_A路电流 => Ok(MeterResult::A路电流mA(
+                    payload.data[..3]
+                        .into_iter()
+                        // .rev()
+                        .enumerate()
+                        .fold(0, |acc, i| acc + (((i.1 - 0x33) as u32) << i.0 * 8)),
+                )),
+
+                DI_DTL645通用_温度 => Ok(MeterResult::温度_单位0_1C(
+                    // safe
+                    // u16::from_be_bytes(unsafe { *(payload.data.as_ptr() as *mut [u8; 2]) }) - 0x3333,
+                    unsafe { *(payload.data.as_ptr() as *mut u16) } - 0x3333,
+                    // u16::from(payload.data[0])
+                )),
+
+                DI_IM1281X_波特率 => {
+                    Ok(MeterResult::BaudRate(match payload.data.first().unwrap() {
+                        // safe to unwrap
+                        0x04 => BaudRate::Baud1200,
+                        0x08 => BaudRate::Baud2400,
+                        0x10 => BaudRate::Baud4800,
+                        0x20 => BaudRate::Baud9600,
+                        _ => return Err(MeterError::UnknownBaudrate),
+                    }))
+                }
+
+                _ => Err(MeterError::UnsupportedYetDI(
+                    payload.data_identifiers.unwrap(),
                 )),
             }
-        }
-    }
-}
-
-impl From<PayloadData> for Result<MeterResult, MeterError> {
-    fn from(value: PayloadData) -> Self {
-        match value.data_identifiers {
-            Some(DI_IM1281X_A路有功总电量) => {
-                Ok(MeterResult::A路有功总电量_单位0_01KWh(
-                    // safe
-                    u32::from_le_bytes(unsafe { *(value.data.as_ptr() as *mut [u8; 4]) })
-                        - 0x3333_3333,
-                ))
-            }
-
-            Some(DI_IM1281X_B路有功总电量) => {
-                Ok(MeterResult::B路有功总电量_单位0_01KWh(
-                    // safe
-                    u32::from_le_bytes(unsafe { *(value.data.as_ptr() as *mut [u8; 4]) })
-                        - 0x3333_3333,
-                ))
-            }
-
-            Some(DI_DTL645通用_A路电压) => Ok(MeterResult::A路电压单位0_1V(
-                // safe
-                u16::from_le_bytes(unsafe { *(value.data.as_ptr() as *mut [u8; 2]) }) - 0x3333,
-            )),
-
-            // 还没测，睡觉先,这版本不用就先不测了
-            Some(DI_DTL645通用_A路电流) => Ok(MeterResult::A路电流mA(
-                value
-                    .data
-                    .into_iter()
-                    // .rev()
-                    .enumerate()
-                    .fold(0, |acc, i| acc + (((i.1 - 0x33) as u32) << i.0 * 8)),
-            )),
-
-            Some(DI_DTL645通用_温度) => Ok(MeterResult::温度_单位0_1C(
-                // safe
-                // u16::from_be_bytes(unsafe { *(value.data.as_ptr() as *mut [u8; 2]) }) - 0x3333,
-                unsafe { *(value.data.as_ptr() as *mut u16) } - 0x3333,
-                // u16::from(value.data[0])
-            )),
-
-            Some(DI_IM1281X_波特率) => {
-                Ok(MeterResult::BaudRate(match value.data.first().unwrap() {
-                    // safe to unwrap
-                    0x04 => BaudRate::Baud1200,
-                    0x08 => BaudRate::Baud2400,
-                    0x10 => BaudRate::Baud4800,
-                    0x20 => BaudRate::Baud9600,
-                    _ => return Err(MeterError::Unsupported("BaudRate".to_string())),
-                }))
-            }
+        } else {
+            // DI is None
             // This version, it's returned Meter's 6 Bytes address
-            None => {
-                // println!("Payload.data {:02X?}", value.data);
-                // let mut addr: [u8; 6] = unsafe { *(value.data.as_ptr() as *mut [u8; 6]) };
-                // addr.reverse();
-                // for ptr in addr.iter_mut() {
-                //     *ptr -= 0x33;
-                // }
-                let mut addr = [0u8; 6];
-                for (i, j) in value.data.iter().rev().enumerate() {
-                    addr[i] = (*j as usize - 0x33) as u8;
-                }
-                // data 6 bytes
-                Ok(MeterResult::MeterAddr(addr))
+
+            // println!("Payload.data {:02X?}", payload.data);
+            // let mut addr: [u8; 6] = unsafe { *(payload.data.as_ptr() as *mut [u8; 6]) };
+            // addr.reverse();
+            // for ptr in addr.iter_mut() {
+            //     *ptr -= 0x33;
+            // }
+            let mut addr = [0u8; 6];
+            // addr.clone_from_slice(&payload.data[..6]);
+            for (i, j) in payload.data[..6].iter().rev().enumerate() {
+                addr[i] = (*j as usize - 0x33) as u8;
             }
-            _ => Err(MeterError::ParseDiErr(
-                "Unsupported yet, DI(u32)=".to_string()
-                    + &value.data_identifiers.unwrap().to_string(),
-            )),
+            // data 6 bytes
+            Ok(MeterResult::MeterAddr(addr))
         }
     }
 }
 
-impl From<&FunctionCode> for Option<PayloadData> {
+impl From<&FunctionCode> for Option<Payload> {
     fn from(value: &FunctionCode) -> Self {
         match value {
             FunctionCode::MasterQuerySlaveAddr => Self::None,
@@ -541,55 +572,63 @@ impl From<&FunctionCode> for Option<PayloadData> {
             //     data_identifiers: Some(DI_DTL645通用_地址),
             //     data: vec![],
             // }),
-            FunctionCode::MasterSetSlaveAddr(addr) => Self::Some(PayloadData {
+            FunctionCode::MasterSetSlaveAddr(addr) => Self::Some(Payload {
                 // data_identifiers: Some(DI_DTL645通用_地址),
                 data_identifiers: None,
-                data: addr.iter().rev().map(|&x| x + 0x33).collect(),
+                data_len: 6,
+                data: {
+                    let mut data = [0u8; 11];
+                    let mut addr = addr.clone();
+                    addr.reverse();
+                    for x in &mut addr {
+                        *x += 0x33;
+                    }
+                    data[..6].clone_from_slice(&addr);
+                    data
+                },
             }),
             FunctionCode::MasterChangeSlaveBaudRate(baud) => {
-                let mut v = Vec::with_capacity(1);
+                // let mut v = Vec::with_capacity(1);
+                let mut data = [0u8; 11];
                 match baud {
-                    BaudRate::Baud1200 => v.push(0x04 + 0x33),
-                    BaudRate::Baud2400 => v.push(0x08 + 0x33),
-                    BaudRate::Baud4800 => v.push(0x10 + 0x33),
-                    BaudRate::Baud9600 => v.push(0x20 + 0x33),
+                    BaudRate::Baud1200 => data[0] = 0x04 + 0x33,
+                    BaudRate::Baud2400 => data[0] = 0x08 + 0x33,
+                    BaudRate::Baud4800 => data[0] = 0x10 + 0x33,
+                    BaudRate::Baud9600 => data[0] = 0x20 + 0x33,
                 };
-                Self::Some(PayloadData {
+                Self::Some(Payload {
                     // data_identifiers: Some(DI_IM1281X_波特率),
                     data_identifiers: None,
-                    data: v,
+                    data_len: 1,
+                    data,
                 })
             }
-            FunctionCode::M查询A路有功总电量IM1281X => Self::Some(PayloadData {
+            FunctionCode::M查询A路有功总电量IM1281X => Self::Some(Payload {
                 data_identifiers: Some(DI_IM1281X_A路有功总电量),
-                data: Vec::with_capacity(0),
+                data_len: 0,
+                data: [0u8; 11],
             }),
-            FunctionCode::M查询B路有功总电量IM1281X => Self::Some(PayloadData {
+            FunctionCode::M查询B路有功总电量IM1281X => Self::Some(Payload {
                 data_identifiers: Some(DI_IM1281X_B路有功总电量),
-                data: Vec::with_capacity(0),
+                data_len: 0,
+                data: [0u8; 11],
             }),
-            FunctionCode::M查询温度 => Self::Some(PayloadData {
+            FunctionCode::M查询温度 => Self::Some(Payload {
                 data_identifiers: Some(DI_DTL645通用_温度),
-                data: Vec::with_capacity(0),
+                data_len: 0,
+                data: [0u8; 11],
             }),
-            FunctionCode::M查询A路电流 => Self::Some(PayloadData {
+            FunctionCode::M查询A路电流 => Self::Some(Payload {
                 data_identifiers: Some(DI_DTL645通用_A路电流),
-                data: Vec::with_capacity(0),
+                data_len: 0,
+                data: [0u8; 11],
             }),
-            FunctionCode::MResetMeter => Self::Some(PayloadData {
+            FunctionCode::MResetMeter => Self::Some(Payload {
                 data_identifiers: None,
-                data: vec![0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33],
+                data_len: 8,
+                data: [0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0, 0, 0],
             }),
         }
-    }
-}
-
-impl MeterIO {
-    pub fn new(
-        send: Box<dyn FnMut(&[u8]) -> Result<usize, MeterIOError>>,
-        recv_exact: Box<dyn FnMut(&mut [u8]) -> Result<(), MeterIOError>>,
-    ) -> Self {
-        Self { recv_exact, send }
     }
 }
 
@@ -637,7 +676,7 @@ pub fn parse_result_from_raw_frame(buf: &[u8]) -> Result<MeterResult, MeterError
 ///
 /// Simply use it directly
 ///
-pub fn generate_raw_frame(addr: Option<[u8; 6]>, fc: &FunctionCode) -> Vec<u8> {
+pub fn generate_raw_frame(addr: Option<[u8; 6]>, fc: &FunctionCode) -> DLT645_2007Raw {
     let addr = match fc {
         &FunctionCode::MasterQuerySlaveAddr => [0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA],
         // &FunctionCode::MasterChangeSlaveBaudRate(_) => [0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA],
@@ -650,14 +689,7 @@ pub fn generate_raw_frame(addr: Option<[u8; 6]>, fc: &FunctionCode) -> Vec<u8> {
             }
         }
     };
-    // let addr = if fc == &FunctionCode::MasterQuerySlaveAddr {
-    //     [0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]
-    // } else if let Some(addr) = addr {
-    //     addr
-    // } else {
-    //     [0x11, 0x11, 0x11, 0x11, 0x11, 0x11]
-    // };
-    DLT645_2007::new(addr, fc.into(), fc.into()).to_raw()
+    DLT645_2007::new(addr, fc.into(), fc.into()).to_dlt645_2007raw()
 }
 
 /// Generic Function ! Enough !
@@ -667,29 +699,23 @@ pub fn generate_raw_frame(addr: Option<[u8; 6]>, fc: &FunctionCode) -> Vec<u8> {
 pub fn generic_function(
     addr: Option<[u8; 6]>,
     fc: FunctionCode,
-    io_ops: &mut MeterIO,
+    io: &mut dyn Io,
 ) -> Result<MeterResult, MeterError> {
     // send the raw frame
-    (io_ops.send)(&generate_raw_frame(addr, &fc))?;
+    io.write(&generate_raw_frame(addr, &fc).as_ref())?;
 
+    // 目前最大: 20
     let len = __bytes_should_recv(fc);
-
-    let mut buf = Vec::with_capacity(len);
-    unsafe { buf.set_len(len) };
-    // buf[0] = 0; // uneeded
-    // buf.fill(0); // 只要是read_exact, 这个就没必要
+    let mut buf = [0u8; 20];
 
     // recv 'len' bytes
-    (io_ops.recv_exact)(&mut buf)?;
+    io.recv_exact(&mut buf[..len])?;
 
     // thanks to __bytes_should_recv(), safe to unwrap() here
-    parse_result_from_raw_frame(&buf)
+    parse_result_from_raw_frame(&buf[..len])
 }
 
-// pub fn print_frame(frame: &Vec<u8>) {
-//     print!("[DebugInfo] Debug print a raw frame:");
-//     for i in frame {
-//         print!("{:02X} ", i)
-//     }
-//     println!("");
-// }
+pub trait Io {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, MeterIOError>;
+    fn recv_exact(&mut self, buf: &mut [u8]) -> Result<(), MeterIOError>;
+}
