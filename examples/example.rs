@@ -9,7 +9,7 @@ fn main() {
 
     uart.baudrate = uart_linux::BaudRate::Baud9600;
     uart.timeout_20us = 6000; // 120ms
-    // uart.timeout_s = 1;
+                              // uart.timeout_s = 1;
     uart.apply_settings();
 
     struct UartIo {
@@ -19,6 +19,7 @@ fn main() {
     impl electric_meter::Io for UartIo {
         fn write(&mut self, buf: &[u8]) -> Result<usize, MeterIOError> {
             std::thread::sleep(std::time::Duration::from_millis(100));
+            println!("Uart write data {:X?}", buf);
             match self.uart.write(buf) {
                 Ok(sent) => {
                     if sent < buf.len() {
@@ -34,7 +35,10 @@ fn main() {
         fn recv_exact(&mut self, buf: &mut [u8]) -> Result<(), MeterIOError> {
             std::thread::sleep(std::time::Duration::from_millis(50));
             match self.uart.read_exact(buf) {
-                Ok(_) => Ok(()),
+                Ok(_) => {
+                    println!("Uart recv data {:X?}", buf);
+                    Ok(())
+                }
                 Err(e) => {
                     println!("[ErrInfo]: {:?} \\\n   recved = {:X?}", e, buf);
                     Err(MeterIOError::TimeOutReadExactBytes)
@@ -113,7 +117,7 @@ fn main() {
         "Test Result: {:X?}",
         electric_meter::generic_function(
             Some([0x00, 0x00, 0x00, 0x00, 0x00, 0x1]),
-            electric_meter::FunctionCode::MResetMeter,
+            electric_meter::FunctionCode::MClearMeterData,
             &mut io_ops,
         )
     );

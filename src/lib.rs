@@ -14,7 +14,6 @@ use core::ptr::slice_from_raw_parts;
 
 type Error = MeterError;
 
-const UNINIT_ZERO: u8 = 0;
 // 计量模块没有时间等功能，用不上
 // const METER_BROADCAST_ADDRESS: [u8; 6] = [0x99, 0x99, 0x99, 0x99, 0x99, 0x99];
 
@@ -37,7 +36,7 @@ pub enum FunctionCode {
     // /// 冻结电能数据（计量模块没这功能，这个要采集端去实现，挂这先）
     // FreezeCmdReserved,
     // /// 清零（计量数据，不含地址）,计量模块也没有这功能
-    MResetMeter,
+    MClearMeterData,
     // /// 读电压（一个模块接一路测量电压，其他路电压也是这个）
     // M查询电压,
     // /// 读A路电流。 艾瑞达你B路文档呢？。。。
@@ -418,7 +417,7 @@ impl From<&FunctionCode> for Code {
             FunctionCode::M查询B路有功总电量IM1281X => Self::ReadData,
             FunctionCode::M查询温度 => Self::ReadData,
             FunctionCode::M查询A路电流 => Self::ReadData,
-            FunctionCode::MResetMeter => Self::ResetMeter,
+            FunctionCode::MClearMeterData => Self::ResetMeter,
         }
     }
 }
@@ -456,7 +455,7 @@ impl From<DLT645_2007> for Result<MeterResult, Error> {
                 }
                 Code::WriteData => Err(MeterError::UnsupportedYetWriteData),
                 Code::WriteAddr => {
-                    if let Some(p) = value.payload {
+                    if let Some(_) = value.payload {
                         Err(MeterError::UnExpectedPayload)
                     } else {
                         Ok(MeterResult::SetMeterAddrSuccess(value.addr))
@@ -623,7 +622,7 @@ impl From<&FunctionCode> for Option<Payload> {
                 data_len: 0,
                 data: [0u8; 11],
             }),
-            FunctionCode::MResetMeter => Self::Some(Payload {
+            FunctionCode::MClearMeterData => Self::Some(Payload {
                 data_identifiers: None,
                 data_len: 8,
                 data: [0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0, 0, 0],
@@ -650,7 +649,7 @@ pub fn __bytes_should_recv(fc: FunctionCode) -> usize {
         FunctionCode::M查询B路有功总电量IM1281X => 12 + 4 + 4,
         FunctionCode::M查询温度 => 12 + 4 + 2,
         FunctionCode::M查询A路电流 => 12 + 4 + 3,
-        FunctionCode::MResetMeter => 12,
+        FunctionCode::MClearMeterData => 12,
     }
 }
 
